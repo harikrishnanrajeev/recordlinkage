@@ -1,0 +1,56 @@
+import recordlinkage as rl
+
+#Using data from german cancer registry
+from recordlinkage.datasets import load_krebsregister
+
+krebs_data, krebs_match = load_krebsregister(missing_values=0)
+#krebs_data  -> 5749132 records
+#krebs_match -> 20931 true matches
+
+krebs_data.head()
+
+#---------------------------------------------------------------
+            cmp_firstname1	cmp_firstname2	cmp_lastname1	cmp_lastname2	cmp_sex	cmp_birthday	cmp_birthmonth	cmp_birthyear	cmp_zipcode
+id1	   id2									
+22161	38467	1.000000	      0.0	             0.142857	     0.0	          1	      0.0	         1.0	            0.0	         0.0
+38713	75352	0.000000	      0.0	             0.571429	     0.0	          1	      0.0	         0.0	            0.0	         0.0
+#---------------------------------------------------------------
+
+train_ds_pairs = krebs_data[0:5000]
+
+train_ds_pairs_matches_index = train_ds_pairs.index & krebs_match 
+# 2093 matching pairs
+
+# Initialize the classifier
+logreg = rl.LogisticRegressionClassifier()
+
+# Train the classifier
+logreg.learn(train_ds_pairs, train_ds_pairs_matches_index)
+
+# Predict the match status for all record pairs
+result_logreg = logreg.predict(krebs_data)
+
+conf_logreg = rl.confusion_matrix(krebs_match, result_logreg, len(krebs_data))
+conf_logreg
+
+#    P      N
+# P  TP     FN
+# N  FP     TN
+
+array([[  19884,    1047],
+       [    266, 5727935]])
+       
+#F1 = 2 * (TP) / (2*TP + FP + FN)
+F1= 2 * (19884)/(2*(19884)+266+1047)
+
+0.9680387527080646
+
+#Accuracy
+(19884+5727935)/(19884+1047+266+5727935)
+0.9997716176981152
+
+# Naive bayes
+# SVM
+# k-means
+# expectation maximization
+

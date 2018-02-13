@@ -1,0 +1,65 @@
+# Record Linkage using the python "recordlinkage" package
+import recordlinkage
+
+#using build in datasets
+# link the data based on attributes like first name, surname, sex, date of birth, place and address
+from recordlinkage.datasets import load_febrl4
+
+dfA, dfB = load_febrl4()
+
+# Indexation step
+# process of making record pairs is called ‘indexing’.
+# indexing methods available are 
+# a) Full indexing - compare each record in DataFrame dfA with all records of DataFrame dfB
+# b) Blocking - method includes only record pairs that agree on one or more variables
+# c) Sorted Neighbourhood Indexing - when there are lot of spelling mistakes. 
+
+indexer = recordlinkage.BlockIndex(on='given_name')
+pairs = indexer.index(dfA, dfB)
+
+# Comparison step
+# similarity measure between string values using following methods
+# 'jarowinkler’ , ‘levenshtein’(DEFAULT),‘qgram’ or ‘cosine’.
+# Agreement - value is 1 , disagreement - value is 0.
+# https://www.joyofdata.de/blog/comparison-of-string-distance-algorithms/
+
+compare_cl = recordlinkage.Compare()
+
+compare_cl.exact('given_name', 'given_name', label='given_name')
+compare_cl.string('surname', 'surname', method='jarowinkler', threshold=0.85, label='surname')
+compare_cl.exact('date_of_birth', 'date_of_birth', label='date_of_birth')
+compare_cl.exact('suburb', 'suburb', label='suburb')
+compare_cl.exact('state', 'state', label='state')
+compare_cl.string('address_1', 'address_1', threshold=0.85, label='address_1')
+
+features = compare_cl.compute(pairs, dfA, dfB)
+
+# Classification step
+matches = features[features.sum(axis=1) > 3]
+print((matches))
+
+#                              given_name  surname  date_of_birth  suburb  state  address_1
+#rec_id       rec_id                                                       
+#rec-2371-org rec-2371-dup-0           1      1.0              1       1    1       1.0
+#rec-3024-org rec-3024-dup-0           1      1.0              1       0    1       0.0
+#rec-4652-org rec-4652-dup-0           1      1.0              1       0    1       1.0
+#rec-4795-org rec-4795-dup-0           1      1.0              1       1    1       1.0
+#rec-1016-org rec-1016-dup-0           1      1.0              1       1    0       1.0
+
+dfA.loc['rec-3024-org']
+#given_name              michaela
+#surname                  wilkins
+#address_1        hoseason street
+#suburb                 jamestown
+#state                        nsw
+#date_of_birth           19390517
+#Name: rec-3024-org, dtype: object
+        
+dfB.loc['rec-3024-dup-0']
+#given_name             michaela
+#surname                wilkns
+#address_1                 NaN
+#suburb                jamdstown
+#state                     nsw
+#date_of_birth        19390517
+#Name: rec-3024-dup-0, dtype: object

@@ -1,0 +1,295 @@
+import tensorflow as tf
+
+
+def snn(address1, address2, dropout_keep_prob,
+        vocab_size, num_features, input_length):
+    
+    # Define the siamese double RNN with a fully connected layer at the end
+    def siamese_nn(input_vector, num_hidden):
+        cell_unit = tf.contrib.rnn.BasicLSTMCell#tf.nn.rnn_cell.BasicLSTMCell
+        
+        # Forward direction cell
+        lstm_forward_cell = cell_unit(num_hidden, forget_bias=1.0)
+        lstm_forward_cell = tf.contrib.rnn.DropoutWrapper(lstm_forward_cell, output_keep_prob=dropout_keep_prob)
+        
+        # Backward direction cell
+        lstm_backward_cell = cell_unit(num_hidden, forget_bias=1.0)
+        lstm_backward_cell = tf.contrib.rnn.DropoutWrapper(lstm_backward_cell, output_keep_prob=dropout_keep_prob)
+    
+        # Split title into a character sequence
+        input_embed_split = tf.split(axis=1, num_or_size_splits=input_length, value=input_vector)
+        input_embed_split = [tf.squeeze(x, axis=[1]) for x in input_embed_split]
+        
+        # Create bidirectional layer
+        try:
+            outputs, _, _ = tf.contrib.rnn.static_bidirectional_rnn(lstm_forward_cell,
+                                                                    lstm_backward_cell,
+                                                                    input_embed_split,
+                                                                    dtype=tf.float32)
+        except Exception:
+            outputs = tf.contrib.rnn.static_bidirectional_rnn(lstm_forward_cell,
+                                                              lstm_backward_cell,
+                                                              input_embed_split,
+                                                              dtype=tf.float32)
+        # Average The output over the sequence
+        temporal_mean = tf.add_n(outputs) / input_length
+        
+        # Fully connected layer
+        output_size = 10
+        A = tf.get_variable(name="A", shape=[2*num_hidden, output_size],
+                            dtype=tf.float32,
+                            initializer=tf.random_normal_initializer(stddev=0.1))
+        b = tf.get_variable(name="b", shape=[output_size], dtype=tf.float32,
+                            initializer=tf.random_normal_initializer(stddev=0.1))
+        
+        final_output = tf.matmul(temporal_mean, A) + b
+        final_output = tf.nn.dropout(final_output, dropout_keep_prob)
+        
+        return(final_output)
+        
+    output1 = siamese_nn(address1, num_features)
+    # Declare that we will use the same variables on the second string
+    with tf.variable_scope(tf.get_variable_scope(), reuse=True):
+        output2 = siamese_nn(address2, num_features)
+    
+    # Unit normalize the outputs
+    output1 = tf.nn.l2_normalize(output1, 1)
+    output2 = tf.nn.l2_normalize(output2, 1)
+    # Return cosine distance
+    #   in this case, the dot product of the norms is the same.
+    dot_prod = tf.reduce_sum(tf.multiply(output1, output2), 1)
+    
+    return(dot_prod)
+
+
+def get_predictions(scores):
+    predictions = tf.sign(scores, name="predictions")
+    return(predictions)
+
+
+def loss(scores, y_target, margin):
+    # Calculate the positive losses
+    pos_loss_term = 0.25 * tf.square(tf.subtract(1., scores))
+    
+    # If y-target is -1 to 1, then do the following
+    pos_mult = tf.add(tf.multiply(0.5, tf.cast(y_target, tf.float32)), 0.5)
+    # Else if y-target is 0 to 1, then do the following
+    pos_mult = tf.cast(y_target, tf.float32)
+    
+    # Make sure positive losses are on similar strings
+    positive_loss = tf.multiply(pos_mult, pos_loss_term)
+    
+    # Calculate negative losses, then make sure on dissimilar strings
+    
+    # If y-target is -1 to 1, then do the following:
+    neg_mult = tf.add(tf.multiply(-0.5, tf.cast(y_target, tf.float32)), 0.5)
+    # Else if y-target is 0 to 1, then do the following
+    neg_mult = tf.subtract(1., tf.cast(y_target, tf.float32))
+    
+    negative_loss = neg_mult*tf.square(scores)
+    
+    # Combine similar and dissimilar losses
+    loss = tf.add(positive_loss, negative_loss)
+    
+    # Create the margin term.  This is when the targets are 0.,
+    #  and the scores are less than m, return 0.
+    
+    # Check if target is zero (dissimilar strings)
+    target_zero = tf.equal(tf.cast(y_target, tf.float32), 0.)
+    # Check if cosine outputs is smaller than margin
+    less_than_margin = tf.less(scores, margin)
+    # Check if both are true
+    both_logical = tf.logical_and(target_zero, less_than_margin)
+    both_logical = tf.cast(both_logical, tf.float32)
+    # If both are true, then multiply by (1-1)=0.
+    multiplicative_factor = tf.cast(1. - both_logical, tf.float32)
+    total_loss = tf.multiply(loss, multiplicative_factor)
+    
+    # Average loss over batch
+    avg_loss = tf.reduce_mean(total_loss)
+    return(avg_loss)
+
+
+def accuracy(scores, y_target):
+    predictions = get_predictions(scores)
+    # Cast into integers (outputs can only be -1 or +1)
+    y_target_int = tf.cast(y_target, tf.int32)
+    # Change targets from (0,1) --> (-1, 1)
+    #    via (2 * x - 1)
+    #y_target_int = tf.sub(tf.mul(y_target_int, 2), 1)
+    predictions_int = tf.cast(tf.sign(predictions), tf.int32)
+    correct_predictions = tf.equal(predictions_int, y_target_int)
+    accuracy = tf.reduce_mean(tf.cast(correct_predictions, tf.float32))
+    return(accuracy)
+    
+    import os
+import random
+import string
+import numpy as np
+import matplotlib.pyplot as plt
+import tensorflow as tf
+from tensorflow.python.framework import ops
+ops.reset_default_graph()
+
+#Start a graph session
+sess = tf.Session()
+
+#set the model parameters
+batch_size = 200     # How many addresses to train on in one batch
+n_batches = 300      # How many batches to train on
+max_address_len = 20 # How many character to crop/pad each address
+margin = 0.25        # A sort of regularization parameter that allows for 'wiggle' room in bad predicted similarities.
+num_features = 50    # RNN feature size
+dropout_keep_prob = 0.8 # Dropout probability
+
+#function to randomly create one typo in a string
+def create_typo(s):
+    rand_ind = random.choice(range(len(s)))
+    s_list = list(s)
+    s_list[rand_ind]=random.choice(string.ascii_lowercase + '0123456789')
+    s = ''.join(s_list)
+    return(s)
+
+# Generate data
+street_names = ['abbey', 'baker', 'canal', 'donner', 'elm', 'fifth',
+                'grandvia', 'hollywood', 'interstate', 'jay', 'kings']
+street_types = ['rd', 'st', 'ln', 'pass', 'ave', 'hwy', 'cir', 'dr', 'jct']
+
+# Define test addresses
+test_queries = ['111 abbey ln', '271 doner cicle',
+                '314 king avenue', 'tensorflow is fun']
+test_references = ['123 abbey ln', '217 donner cir', '314 kings ave',
+                   '404 hollywood st', 'tensorflow is so fun']
+                   
+#Get a batch of size n, half of which is similar addresses, half are not
+def get_batch(n):
+    # Generate a list of reference addresses with similar addresses that have
+    # a typo.
+    numbers = [random.randint(1, 9999) for i in range(n)]
+    streets = [random.choice(street_names) for i in range(n)]
+    street_suffs = [random.choice(street_types) for i in range(n)]
+    full_streets = [str(w) + ' ' + x + ' ' + y for w,x,y in zip(numbers, streets, street_suffs)]
+    typo_streets = [create_typo(x) for x in full_streets]
+    reference = [list(x) for x in zip(full_streets, typo_streets)]
+    
+    # Shuffle last half of them for training on dissimilar addresses
+    half_ix = int(n/2)
+    bottom_half = reference[half_ix:]
+    true_address = [x[0] for x in bottom_half]
+    typo_address = [x[1] for x in bottom_half]
+    typo_address = list(np.roll(typo_address, 1))
+    bottom_half = [[x,y] for x,y in zip(true_address, typo_address)]
+    reference[half_ix:] = bottom_half
+    
+    # Get target similarities (1's for similar, -1's for non-similar)
+    target = [1]*(n-half_ix) + [-1]*half_ix
+    reference = [[x,y] for x,y in zip(reference, target)]
+    return(reference)
+    
+    # matching input records
+#[[['3537 elm cir', '3537 ezm cir'], 1], 
+#[['1324 kings cir', '1f24 kings cir'], 1], 
+#[['9837 interstate ln', '9837 interotate ln'], 1], 
+#[['5071 jay pass', '5071 jqy pass'], 1], 
+#[['7213 baker dr', '7213 bakerjdr'], 1], 
+#[['2300 interstate cir', '2300 inters2ate cir'], 1], 
+#[['7695 elm st', '7695 ilm st'], 1], 
+#[['8951 baker hwy', '8951 bak0r hwy'], 1], 
+#[['3915 abbey ave', '391x abbey ave'], 1], 
+#[['7726 donner dr', '7726 donser dr'], 1], 
+#[['59 jay ave', '59 jay avg'], 1], 
+#[['5806 interstate jct', '5806 interstate j6t'], 1], 
+# not matching input records
+#[['7395 canal cir', '2790 olm dr'], -1], 
+#[['3499 fifth hwy', '7395 5anal cir'], -1], 
+#[['2868 jay jct', '3499 fifta hwy'], -1], 
+#[['919 fifth jct', '2868 jay jcb'], -1], 
+#[['2019 elm st', '919 fieth jct'], -1], 
+#[['8124 donner ave', '2019 exm st'], -1], 
+#[['5940 interstate cir', '8124 donner avf'], -1], 
+#[['6968 elm rd', '5940 inter9tate cir'], -1], 
+#[['7982 donner pass', '696f elm rd'], -1], 
+#[['4487 baker ave', '7982 donnek pass'], -1], 
+#[['5144 jay st', '6d39 jay rd'], -1], 
+#[['1192 jay ave', '514g jay st'], -1], 
+
+# Train loop
+train_loss_vec = []
+train_acc_vec = []
+for b in range(n_batches):
+    # Get a batch of data
+    batch_data = get_batch(batch_size)
+    # Shuffle data
+    np.random.shuffle(batch_data)
+    # Parse addresses and targets
+    input_addresses = [x[0] for x in batch_data]
+    target_similarity = np.array([x[1] for x in batch_data])
+    address1 = np.array([address2onehot(x[0]) for x in input_addresses])
+    address2 = np.array([address2onehot(x[1]) for x in input_addresses])
+    
+    train_feed_dict = {address1_ph: address1,
+                       address2_ph: address2,
+                       y_target_ph: target_similarity,
+                       dropout_keep_prob_ph: dropout_keep_prob}
+
+    _, train_loss, train_acc = sess.run([train_op, batch_loss, batch_accuracy],
+                                        feed_dict=train_feed_dict)
+    # Save train loss and accuracy
+    train_loss_vec.append(train_loss)
+    train_acc_vec.append(train_acc)
+    # Print out statistics
+    if b%10==0:
+        print('Training Metrics, Batch {0}: Loss={1:.3f}, Accuracy={2:.3f}.'.format(b, train_loss, train_acc))
+    
+#Training Metrics, Batch 0: Loss=0.634, Accuracy=0.500.
+#Training Metrics, Batch 10: Loss=0.073, Accuracy=0.680.
+#Training Metrics, Batch 20: Loss=0.064, Accuracy=0.735.
+#Training Metrics, Batch 30: Loss=0.072, Accuracy=0.710.
+#Training Metrics, Batch 40: Loss=-0.032, Accuracy=0.760.
+#Training Metrics, Batch 50: Loss=0.021, Accuracy=0.770.
+#Training Metrics, Batch 60: Loss=0.001, Accuracy=0.750.
+#Training Metrics, Batch 70: Loss=0.074, Accuracy=0.710.
+#Training Metrics, Batch 80: Loss=0.018, Accuracy=0.750.
+#Training Metrics, Batch 90: Loss=-0.015, Accuracy=0.785.
+#Training Metrics, Batch 100: Loss=0.015, Accuracy=0.795.
+#Training Metrics, Batch 110: Loss=0.026, Accuracy=0.780.
+#Training Metrics, Batch 120: Loss=0.015, Accuracy=0.740.
+#Training Metrics, Batch 130: Loss=0.003, Accuracy=0.755.
+#Training Metrics, Batch 140: Loss=0.012, Accuracy=0.805.
+#Training Metrics, Batch 150: Loss=-0.020, Accuracy=0.815.
+#Training Metrics, Batch 160: Loss=0.022, Accuracy=0.750.
+#Training Metrics, Batch 170: Loss=0.014, Accuracy=0.735.
+#Training Metrics, Batch 180: Loss=0.004, Accuracy=0.760.
+#Training Metrics, Batch 190: Loss=-0.002, Accuracy=0.765.
+#Training Metrics, Batch 200: Loss=-0.023, Accuracy=0.755.
+#Training Metrics, Batch 210: Loss=0.043, Accuracy=0.760.
+#Training Metrics, Batch 220: Loss=-0.056, Accuracy=0.765.
+#Training Metrics, Batch 230: Loss=-0.011, Accuracy=0.725.
+#Training Metrics, Batch 240: Loss=-0.020, Accuracy=0.805.
+#Training Metrics, Batch 250: Loss=0.052, Accuracy=0.745.
+#Training Metrics, Batch 260: Loss=-0.023, Accuracy=0.790.
+#Training Metrics, Batch 270: Loss=0.022, Accuracy=0.740.
+#Training Metrics, Batch 280: Loss=-0.026, Accuracy=0.755.
+#Training Metrics, Batch 290: Loss=-0.011, Accuracy=0.810.
+
+#Let us test the algorithm on the test set of addresses
+# Calculate the nearest addresses for test inputs
+# First process the test_queries and test_references
+test_queries_ix = np.array([address2onehot(x) for x in test_queries])
+test_references_ix = np.array([address2onehot(x) for x in test_references])
+num_refs = test_references_ix.shape[0]
+best_fit_refs = []
+for query in test_queries_ix:
+    test_query = np.repeat(np.array([query]), num_refs, axis=0)
+    test_feed_dict = {address1_ph: test_query,
+                      address2_ph: test_references_ix,
+                      y_target_ph: target_similarity,
+                      dropout_keep_prob_ph: 1.0}
+    test_out = sess.run(text_snn, feed_dict=test_feed_dict)
+    best_fit = test_references[np.argmax(test_out)]
+    best_fit_refs.append(best_fit)
+
+print('Query Addresses: {}'.format(test_queries))
+print('Model Found Matches: {}'.format(best_fit_refs))
+#Query Addresses: ['111 abbey ln', '271 doner cicle', '314 king avenue', 'tensorflow is fun']
+#Model Found Matches: ['123 abbey ln', '217 donner cir', '314 kings ave', 'tensorflow is so fun']
